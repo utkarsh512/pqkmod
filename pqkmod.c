@@ -1,6 +1,6 @@
 /**
  * CS60038 - Advances in Operating Systems Design
- * Assignment 1 - Part B
+ * Assignment 1 (Part B) and Assigment 2
  * 
  * Loadable Kernel Module for implementing a Priority-queue
  * 
@@ -16,6 +16,8 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
+#include <linux/sched.h>
+#include <linux/kernel.h>
 
 MODULE_AUTHOR("Utkarsh Patel");
 MODULE_DESCRIPTION("Loadable Kernel Module for implementing a Priority-queue");
@@ -28,7 +30,20 @@ MODULE_LICENSE("GPL");
 
 static DEFINE_MUTEX(qlock);                /* mutex lock over `queues` */
 #define PERMS 0666                         /* all users can read and write */
-#define DEVICE_NAME "partb_1_17"
+#define DEVICE_NAME "cs60038_a2_17"
+
+#define PB2_SET_CAPACITY _IOW(0x10, 0x31, int32_t *)
+#define PB2_INSERT_INT   _IOW(0x10, 0x32, int32_t *)
+#define PB2_INSERT_PRIO  _IOW(0x10, 0x33, int32_t *) 
+#define PB2_GET_INFO     _IOW(0x10, 0x34, int32_t *)
+#define PB2_GET_MIN      _IOW(0x10, 0x35, int32_t *)
+#define PB2_GET_MAX      _IOW(0x10, 0x36, int32_t *)
+
+struct obj_info {
+	int32_t prio_que_size; 	/* current number of elements in priority-queue */
+	int32_t capacity;		/* maximum capacity of priority-queue */
+};
+
 
 static ssize_t qwrite(struct file *, const char *, size_t, loff_t *);
 static ssize_t qread (struct file *, char *      , size_t, loff_t *);
@@ -36,11 +51,14 @@ static ssize_t qread (struct file *, char *      , size_t, loff_t *);
 static int qopen   (struct inode *, struct file *);
 static int qrelease(struct inode *, struct file *);
 
+static long qioctl(struct file *, unsigned int, unsigned long);
+
 static struct proc_ops proc_ops = {
     .proc_open    = qopen,
     .proc_release = qrelease,
     .proc_read    = qread,
     .proc_write   = qwrite,
+    .proc_ioctl   = qioctl,
 };
 
 static int  _module_init(void);        /* routine to be passed to module_init */
@@ -84,9 +102,12 @@ static struct priority_queue *create_queue(size_t);
 static void                  free_queue   (struct priority_queue *);
 static void                  swap_items   (struct item_t *, struct item_t *);
 static int                   compare_items(struct item_t, struct item_t);
+static int                   remove_item  (struct priority_queue *, size_t);
 static int                   push         (struct priority_queue *, struct item_t);
-static int32_t               pop          (struct priority_queue *);
+static int32_t               extract_min  (struct priority_queue *);
+static int32_t               extract_max  (struct priority_queue *);
 static void                  heapify      (struct priority_queue *, size_t);
+static int                   decrease_prio(struct priority_queue *, size_t, int32_t);
 
 
 /* Linked list of priority queues */
@@ -207,6 +228,29 @@ static int compare_items(struct item_t item1, struct item_t item2) {
         (item1.priority < item2.priority) ? -1 : 0;
 }
 
+/**
+ * @brief Removes the element at given index
+ * 
+ * @param queue: Pointer to the priority queue where deletion is to be performed
+ * @param index: Index of the item to be removed
+ * 
+ * @return 0 (for success) and -EACCES for out-of-bounds index
+ */
+static int remove_item(struct priority_queue *queue, size_t index) {
+    if (index >= queue->count || index < 0) {
+        printk(KERN_ALERT "<remove_item@%d>: Index out-of-bounds.\n", current->pid);
+        return -EACCES;
+    }
+
+    int status = decrease_prio(queue, index, 0);
+    if (status != 0) { /* decrease_prio raised an exception */
+        return status;
+    }
+
+    extract_min(queue);
+
+    return 0;
+}
 
 /**
  * @brief Insert an element in a priority queue
@@ -240,15 +284,44 @@ static int push(struct priority_queue *queue, struct item_t item) {
 }
 
 /**
- * @brief Remove the highest priority item from priority queue and return it
+ * @brief Decrease the priority of item at given index
+ * 
+ * @param queue: Pointer to the priority queue
+ * @param index: Index of the item for which priority has to be decreased
+ * @param prio: New priority value for the item
+ * 
+ * @returns 0 (for success) and -EINVAL (for invalid arguments)
+ */
+static int decrease_prio(struct priority_queue *queue, size_t index, int32_t prio) {
+    /* Verify that given priority is less than priority of item at given index */
+    if (queue->items[index].priority < prio) {
+        printk(KERN_ALERT "<decrease_prio@%d>: Invalid priority given!\n", current->pid);
+        return -EINVAL;
+    }
+
+    /* Change priority of the item at given index */
+    queue->items[index].priority = prio;
+
+    /* Fix priority queue property if it is violated */
+    while (index != 0 && 
+        compare_items(queue->items[PARENT(index)], queue->items[index]) > 0) {
+        swap_items(&queue->items[PARENT(index)], &queue->items[index]);
+        index = PARENT(index);
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Remove the minimum priority item from priority queue and return it
  * 
  * @param queue: Pointer to priority queue structure
  * 
  * @returns item value for success, -EACCES for failure
  */
-static int32_t pop(struct priority_queue *queue) {
+static int32_t extract_min(struct priority_queue *queue) {
     if (queue->count == 0) {
-        printk(KERN_ALERT "<pop@%d>: No item to pop.\n", current->pid);
+        printk(KERN_ALERT "<extract_min@%d>: No item to extract.\n", current->pid);
         return -EACCES;
     }
 
@@ -261,6 +334,47 @@ static int32_t pop(struct priority_queue *queue) {
     queue->items[0] = queue->items[queue->count - 1];
     queue->count--;
     heapify(queue, 0);
+
+    return value;
+}
+
+/**
+ * @brief Remove the maximum priority item from priority queue and return it
+ * @details This method should not be used often as getting maximum priority element
+ * from a min heap is O(n)
+ * 
+ * @param queue: Pointer to priority queue structure
+ * 
+ * @returns item value for success, -EACCES for failure
+ */
+static int32_t extract_max(struct priority_queue *queue) {
+    if (queue->count == 0) {
+        printk(KERN_ALERT "<extract_max@%d>: No item to extract.\n", current->pid);
+        return -EACCES;
+    }
+
+    if (queue->count == 1) {
+        queue->count = 0;
+        return queue->items[0].value;
+    }
+
+    size_t  index = PARENT(queue->count - 1);
+    int32_t max_prio = 0;
+    size_t  max_prio_index = index;
+
+    while (++index < queue->count) {
+        if (max_prio < queue->items[index].priority) {
+            max_prio = queue->items[index].priority;
+            max_prio_index = index;
+        }
+    }
+
+    int32_t value = queue->items[max_prio_index].value;
+
+    int status = remove_item(queue, max_prio_index);
+    if (status != 0) { /* remove_item raised an exception */
+        return status;
+    }
 
     return value;
 }
@@ -295,7 +409,6 @@ static void heapify(struct priority_queue *queue, size_t index) {
         heapify(queue, pos);
     }
 }
-
 
 
 /**
@@ -569,7 +682,7 @@ static ssize_t qwrite(struct file *file, const char *buf, size_t count, loff_t *
 
 
 /**
- * @brief Read value of highest priority item from current process's queue and pop it
+ * @brief Read value of highest priority item from current process's queue and extract_min it
  * 
  * @return Number of bytes read (if successful)
  *         -EINVAL
@@ -610,7 +723,7 @@ static ssize_t qread(struct file *file, char *buf, size_t count, loff_t *pos) {
         return -EACCES;
     }
 
-    int32_t item_value = pop(queue_list->queue);
+    int32_t item_value = extract_min(queue_list->queue);
     int status = copy_to_user(buf, (int32_t *)(&item_value), count);
 
     if (status < 0) {
@@ -659,6 +772,248 @@ static int qopen(struct inode *inode, struct file *file) {
 static int qrelease(struct inode *inode, struct file *file) {
     delete_queue_list(current->pid);
     print_list();
+    return 0;
+}
+
+
+/**
+ * @brief Support for ioctl calls to manipulate priority queue
+ */
+static long qioctl(struct file *file, unsigned int cmd, unsigned long arg) {
+    /* Fetch priority queue for current process */
+    struct queue_list *queue_list = get_queue_list(current->pid);
+    if (queue_list == NULL) {
+        /* No queue_list associated with current process */
+        printk(
+            KERN_ALERT DEVICE_NAME " <qioctl@%d>: No file associated with "
+            "current process!\n", current->pid
+        );
+        return -EACCES;
+    }
+
+    int status;
+    int32_t num, item_value;
+
+    switch(cmd) {
+
+        /* (Re)Initialize queue for the current process */
+        case PB2_SET_CAPACITY: ;
+
+            int32_t queue_size;
+            status = copy_from_user(&queue_size, (int32_t *) arg, sizeof(int32_t));
+            if (status) {
+                return -EINVAL;
+            }
+
+            if (queue_size <= 0 || queue_size > MAX_PQ_CAPACITY) {
+                printk(
+                    KERN_ALERT DEVICE_NAME "<qioctl::PB2_SET_CAPACITY@%d>: "
+                    "Priority-queue size should be in range [1, 100], got %d!",
+                    current->pid, queue_size
+                );
+                return -EINVAL;
+            }
+
+            free_queue(queue_list->queue);
+            queue_list->queue = create_queue(queue_size);
+            if (queue_list->queue == NULL) {
+                /* Error will be reported in `create_queue` method */
+                return -ENOMEM;
+            }
+
+            printk(
+                KERN_INFO DEVICE_NAME " <qioctl::PB2_SET_CAPACITY@%d>: New "
+                "queue of capacity %d allocated for current process!\n", 
+                current->pid, queue_size
+            );
+
+            break;
+
+        /* Cache item value in the queue */
+        case PB2_INSERT_INT:
+
+            if (queue_list->queue == NULL) {
+                /* Queue is not initialized for this process */
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_INSERT_INT@%d>: No "
+                    "queue allocated for current process!\n", current->pid
+                );
+                return -EACCES;
+            }
+
+            if (queue_list->is_item_value_cached) {
+                /* Item value is already cached */
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_INSERT_INT@%d>: Item "
+                    "value is already cached for current process!\n", current->pid
+                );
+                return -EACCES;
+            }
+
+            status = copy_from_user(&num, (int32_t *) arg, sizeof(int32_t));
+            if (status) {
+                return -EINVAL;
+            }
+
+            printk(
+                KERN_INFO DEVICE_NAME " <qioctl::PB2_INSERT_INT@%d>: Received "
+                "item value %d!\n", current->pid, num
+            );
+
+            queue_list->item_value_cache = num;
+            queue_list->is_item_value_cached = 1;
+
+            printk(
+                KERN_INFO DEVICE_NAME " <qioctl::PB2_INSERT_INT@%d>: Item value"
+                " cached, waiting for item priority.\n", current->pid
+            );
+
+            break;
+
+        /* Get item priority and push item in the queue */
+        case PB2_INSERT_PRIO:
+
+            if (queue_list->queue == NULL) {
+                /* Queue is not initialized for this process */
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_INSERT_PRIO@%d>: No "
+                    "queue allocated for current process!\n", current->pid
+                );
+                return -EACCES;
+            }
+
+            if (queue_list->is_item_value_cached == 0) {
+                /* Item value is not cached */
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_INSERT_PRIO@%d>: No "
+                    "item value cached for current process!\n", current->pid
+                );
+                return -EACCES;
+            }
+
+            status = copy_from_user(&num, (int32_t *) arg, sizeof(int32_t));
+            if (status) {
+                return -EINVAL;
+            }
+
+            if (num <= 0) {
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_INSERT_PRIO@%d>: "
+                    "Invalid argument, priority must be a positive integer!\n", 
+                    current->pid
+                );
+                return -EINVAL;
+            }
+
+            printk(
+                KERN_INFO DEVICE_NAME " <qioctl::PB2_INSERT_PRIO@%d>: Received "
+                "item priority %d!\n", current->pid, num
+            );
+
+            /* Prepare item to push to priority queue */
+            struct item_t new_item = (struct item_t) {
+                .value    = queue_list->item_value_cache,
+                .priority = num,
+            };
+
+            status = push(queue_list->queue, new_item);
+            if (status < 0) {
+                /* Overflow in priority queue */
+                return status;
+            }
+
+            printk(
+                KERN_INFO DEVICE_NAME " <qioctl::PB2_INSERT_PRIO@%d>: Item "
+                "inserted in queue.\n", current->pid
+            );
+            queue_list->is_item_value_cached = 0;
+
+            break;
+
+        /* Get queue information */
+        case PB2_GET_INFO:
+
+            if (queue_list->queue == NULL) {
+                /* Queue is not initialized for this process */
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_GET_INFO@%d>: No "
+                    "queue allocated for current process!\n", current->pid
+                );
+                return -EACCES;
+            }
+
+            struct obj_info obj_info;
+            obj_info.prio_que_size = queue_list->queue->count;
+            obj_info.capacity      = queue_list->queue->capacity;
+
+            status = copy_to_user(
+                (struct obj_info *) arg, &obj_info, sizeof(struct obj_info)
+            );
+            if (status) {
+                return -EINVAL;
+            }
+            break;
+        
+        /* Get minimum priority item */
+        case PB2_GET_MIN:
+
+            if (queue_list->queue == NULL) {
+                /* Queue is not initialized for this process */
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_GET_MIN@%d>: No "
+                    "queue allocated for current process!\n", current->pid
+                );
+                return -EACCES;
+            }
+
+            if (queue_list->queue->count == 0) {
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_GET_MIN@%d>: No item "
+                    "present in priority queue!\n", current->pid
+                );
+                return -EACCES;
+            }
+
+            item_value = extract_min(queue_list->queue);
+            status = copy_to_user((int32_t *) arg, &item_value, sizeof(int32_t));
+            if (status) {
+                return -EINVAL;
+            }
+
+            break;
+
+        /* Get maximum priority item */
+        case PB2_GET_MAX:
+
+            if (queue_list->queue == NULL) {
+                /* Queue is not initialized for this process */
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_GET_MAX@%d>: No "
+                    "queue allocated for current process!\n", current->pid
+                );
+                return -EACCES;
+            }
+
+            if (queue_list->queue->count == 0) {
+                printk(
+                    KERN_ALERT DEVICE_NAME " <qioctl::PB2_GET_MAX@%d>: No item "
+                    "present in priority queue!\n", current->pid
+                );
+                return -EACCES;
+            }
+
+            item_value = extract_max(queue_list->queue);
+            status = copy_to_user((int32_t *) arg, &item_value, sizeof(int32_t));
+            if (status) {
+                return -EINVAL;
+            }
+            break;
+
+        default:
+            /* Invalid command */
+            return -EINVAL;
+    }
+
     return 0;
 }
 
