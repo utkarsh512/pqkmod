@@ -45,7 +45,7 @@ int main(int argc, const char *argv[]) {
 
     while (flag) {
         /* Print menu */
-        printf("\n\n--------------------");
+        printf("\n\n--------------------\n\n");
         printf("[1] SET_CAPACITY\n");
         printf("[2] INSERT_INT\n");
         printf("[3] INSERT_PRIO\n");
