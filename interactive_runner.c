@@ -1,35 +1,34 @@
-/**
- * CS60038 - Advances in Operating Systems Design
- * Assignment 1 - Part B
- * 
- * Testing priority queue module
- * 
- * Author: Utkarsh Patel (18EC35034)
- * 
- * This module is written to work on Ubuntu 20.04 operating system having 
- * kernel version 5.6.9
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <string.h>
 
-#define DEVICE_NAME "partb_1_17"
+#define PERMS 0666                         /* all users can read and write */
+#define DEVICE_NAME "cs60038_a2_17"
+
+#define PB2_SET_CAPACITY _IOW(0x10, 0x31, int32_t *)
+#define PB2_INSERT_INT   _IOW(0x10, 0x32, int32_t *)
+#define PB2_INSERT_PRIO  _IOW(0x10, 0x33, int32_t *) 
+#define PB2_GET_INFO     _IOW(0x10, 0x34, int32_t *)
+#define PB2_GET_MIN      _IOW(0x10, 0x35, int32_t *)
+#define PB2_GET_MAX      _IOW(0x10, 0x36, int32_t *)
 
 #define RED         "\x1B[31m"
 #define GRN         "\x1B[32m"
 #define RESET       "\x1B[0m"
 
+struct obj_info {
+	int32_t prio_que_size; 	/* current number of elements in priority-queue */
+	int32_t capacity;		/* maximum capacity of priority-queue */
+};
+
 
 int main(int argc, const char *argv[]) {
-    int n, fd, status;
-    pid_t pid;
-    char buf[256];
-    int32_t value, priority;
+    int fd, status;
     char proc_file[100] = "/proc/";
 
     strcat(proc_file, DEVICE_NAME);
@@ -40,62 +39,97 @@ int main(int argc, const char *argv[]) {
         exit(1);
     }
 
-    printf("<main>: Enter queue size: ");
-    scanf("%d", &n);
-    buf[0] = n;
+    int ops, flag = 1;
+    int32_t num;
+    struct obj_info obj_info;
 
-    /* Initialize priority queue */
-    status = write(fd, buf, 1);
-    if (status < 0) {
-        perror(RED "<main>: Cannot write to file!\n" RESET);
-        close(fd);
-        exit(1);
-    }
-    printf("<main>: Wrote %d bytes.\n", status);
-
-    while (1) {
-        printf("<main>: Perform read/write or quit? [r/w/q]: ");
-        scanf("%s", buf);
-        if (strlen(buf) != 1 || !(buf[0] == 'r' || buf[0] == 'w' || buf[0] == 'q')) {
-            printf("<main>: Invalid option!\n");
-            continue;
-        }
-        if (buf[0] == 'r') {
-            /* Reading from priority queue */
-            status = read(fd, (void *) &value, sizeof(int32_t));
-            if (status < 0) {
-                perror(RED "<main>: Reading from priority queue failed!\n" RESET);
-                close(fd);
-                exit(1);
-            }
-            printf("<main>: Read %d bytes.\n", status);
-            printf("<main>: Highest priority item: %d\n", value);
-        }
-
-        else if (buf[0] == 'w') {
-            printf("<main>: Enter item value and priority: ");
-            scanf("%d %d", &value, &priority);
+    while (flag) {
+        /* Print menu */
+        printf("\n\n--------------------");
+        printf("[1] SET_CAPACITY\n");
+        printf("[2] INSERT_INT\n");
+        printf("[3] INSERT_PRIO\n");
+        printf("[4] GET_INFO\n");
+        printf("[5] GET_MIN\n");
+        printf("[6] GET_MAX\n");
+        printf("[7] Exit\n");
+        printf("\n[*] Enter your choice [1..7]: ");
+        scanf("%d", &ops);
+    
+        switch (ops) {
+            case 1:
+                printf("[*] Enter priority queue size: ");
+                scanf("%d", &num);
+                status = ioctl(fd, PB2_SET_CAPACITY, &num);
+                if (status) {
+                    perror(RED "[-] Error while initializing queue!\n" RESET);
+                    close(fd);
+                    exit(1);
+                }
+                printf("[+] Initialized queue with size %d.\n", num);
+                break;
             
-            /* Write item value */
-            status = write(fd, &value, sizeof(int32_t));
-            if (status < 0) {
-                perror(RED "<main>: Writing to priority queue failed!\n" RESET);
-                close(fd);
-                exit(1);
-            }
-            printf("<main>: Wrote %d bytes.\n", status);
+            case 2:
+                printf("[*] Enter item value: ");
+                scanf("%d", &num);
+                status = ioctl(fd, PB2_INSERT_INT, &num);
+                if (status) {
+                    perror(RED "[-] Error while caching item value!\n" RESET);
+                    close(fd);
+                    exit(1);
+                }
+                printf("[+] Item value %d successfully cached.\n", num);
+                break;
 
-            /* Write item priority */
-            status = write(fd, &priority, sizeof(int32_t));
-            if (status < 0) {
-                perror(RED "<main>: Writing to priority queue failed!\n" RESET);
-                close(fd);
-                exit(1);
-            }
-            printf("<main>: Wrote %d bytes.\n", status);
+            case 3:
+                printf("[*] Enter item priority: ");
+                scanf("%d", &num);
+                status = ioctl(fd, PB2_INSERT_PRIO, &num);
+                if (status) {
+                    perror(RED "[-] Error while pushing item to queue!\n" RESET);
+                    close(fd);
+                    exit(1);
+                }
+                printf("[+] Item with priority %d successfully pushed.\n", num);
+                break;
+            
+            case 4:
+                status = ioctl(fd, PB2_GET_INFO, &obj_info);
+                if (status) {
+                    perror(RED "[-] Error while extracting queue metadata!\n" RESET);
+                    close(fd);
+                    exit(1);
+                }
+                printf("[+] Queue size: %d, Queue capacity: %d\n", obj_info.prio_que_size, obj_info.capacity);
+                break;
+
+            case 5:
+                status = ioctl(fd, PB2_GET_MIN, &num);
+                if (status) {
+                    perror(RED "[-] Error while extracting minimum!\n" RESET);
+                    close(fd);
+                    exit(1);
+                }
+                printf("[+] Minimum priority item: %d\n", num);
+                break;
+            
+            case 6:
+                status = ioctl(fd, PB2_GET_MAX, &num);
+                if (status) {
+                    perror(RED "[-] Error while extracting maximum!\n" RESET);
+                    close(fd);
+                    exit(1);
+                }
+                printf("[+] Maximum priority item: %d\n", num);
+                break;
+            
+            case 7:
+                flag = 0;
+                break;
+            
+            default:
+                printf("[-] Invalid choice!\n");
         }
-         
-        else break;
     }
 
     close(fd);
